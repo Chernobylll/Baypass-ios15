@@ -1,0 +1,178 @@
+package logic
+
+import (
+	"dfqp/pg-login/service"
+	"dfqp/proto/user"
+	"time"
+	"math/rand"
+	"putil/log"
+	"dfqp/proto/autoidpro"
+)
+
+const (
+	//
+	guestType = 1
+	//
+	boyaaucType = 2
+  //
+	wechatType = 14
+
+	byAccountExpires = 2592000
+	byPassIphone = 2
+	byPassAndroid = 1
+	//个性签名
+	profileSign = "1580014，paoind！"
+
+	addCidMapFail = 1
+	addPlatformId2CidFail = 2 //pg_platform2cid
+	addUsersFail = 3 //pg_user
+)
+
+type RegResponse struct {
+	ErrCode int32
+	ErrMsg string
+	Cid int64
+	IsReg bool
+	LoginType int32
+	Pwd string
+	AccessToken string
+	Bid string
+}
+
+//基类
+type BaseLogic struct {}
+
+//生成cid
+func (this *BaseLogic) generateCid(platformType int32) int64 {
+	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	//cid := int64(r.Intn(1000000))
+	request := new(autoidpro.AutoidRequest)
+	request.Btag = "user"
+	reqBytes, _ := request.Marshal()
+	response := service.Client.SendAndRecvRespRpcMsg("autoidmanager.GetId", reqBytes, 3000, 0)
+	plog.Debug("response address is: ", &response, "seq is: ", response.Seq, "value is: ", response.Body)
+	if response.ReturnCode != 0 {
+		plog.Debug("rpc return code = ", response.ReturnCode, " return err = ", response.Err)
+		return 0
+	} else {
+		arithResp := new(autoidpro.AutoidResponse)
+		arithResp.Unmarshal(response.Body)
+		plog.Debug("return id  = ", arithResp.Bid)
+		if arithResp.Bid >= 1  {
+			platformId, err := service.CidMapService.GetPlatformId(arithResp.Bid, platformType)
+			if err != nil {
+				return 0
+			}
+			if len(platformId) > 0 {
+				plog.Warn("bid duplicate: ", arithResp.Bid)
+				return 0
+			}
+			return arithResp.Bid
+		} else {
+			plog.Warn("bid value is: ", arithResp.Bid)
+			return 0
+		}
+	}
+}
+
+func (this *BaseLogic) getNickName() string {
+	firstArr := []string{"partA", "partB"}
+	lastArr := []string{"partC", "partD"}
+	n := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(len(firstArr))
+	firstNickArr := nickNameMap[firstArr[n]]
+	firstLen := len(firstNickArr)
+	nn := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(firstLen)
+
+	m := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(len(lastArr))
+	lastNickArr := nickNameMap[lastArr[m]]
+	lastLen := len(lastNickArr)
+	mm := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(lastLen)
+
+	nick := firstNickArr[nn] + lastNickArr[mm]
+
+	return nick
+}
+func (this *BaseLogic) addUserInfo(platformId string, platformType int32, sex int32, nick, icon string, phone string) int64 {
+	cid := this.generateCid(platformType)
+	if cid == 0 {
+		return 0
+	}
+	ret := this.addPlatform(cid, platformId, platformType)
+	if ret {
+		ret = this.addUser(cid, sex, nick, icon, icon, phone, profileSign)
+		if ret {
+			return cid
+		}
+	}
+	return 0
+}
+
+//添加平台信息
+//@param cid 
+//@param platformId 
+//@param platformType 
+func (this *BaseLogic) addPlatform(cid int64, platformId string, platformType int32) bool {
+	ret := service.Platform2cidService.Insert(cid, platformId, platformType)
+	plog.Debug("BaseLogic.addPlatform platform resp: ", ret)
+	if ret {
+		ret = service.CidMapService.Insert(cid, platformId, platformType)
+		plog.Debug("BaseLogic.addPlatform cidMap resp: ", ret)
+		if !ret {
+			go service.RegFailService.Add(cid, addPlatformId2CidFail)
+		}
+	} else {
+		go service.RegFailService.Add(cid, addCidMapFail)
+//@param cid 用户公共ID
+func (this *BaseLogic) addUser(cid int64, sex int32, nick, icon, bigIcon, phone, sign string) bool {
+	request := new(pgUser.InsertUserInfoRequest)
+	request.Cid = cid
+	request.Nick = nick
+	request.Sex = sex
+	request.Icon = icon
+	request.IconBig = bigIcon
+	request.Phone = phone
+	request.Sign = sign
+	reqBytes, err := request.Marshal()
+	if err != nil {
+		return false
+	}
+	response := service.Client.SendAndRecvRespRpcMsg("pgUser.addUserInfo", reqBytes, 2000, 0)
+	if response.ReturnCode != 0 {
+		go service.RegFailService.Add(cid, addUsersFail)
+		return false
+	}
+	pgResp := new(pgUser.InsertUserInfoResponse)
+	pgResp.Unmarshal(response.Body)
+	plog.Debug("BaseLogic.addUser resp: ", response)
+	//成功
+	if pgResp.Status == 0 {
+		return true
+	} else { //失败
+		go service.RegFailService.Add(cid, addUsersFail)
+		return false
+func (this *BaseLogic) modifyUser(cid int64, sex int32, nick, icon, bigIcon, phone string) bool {
+	request := new(pgUser.ModifyUserInfoRequest)
+	request.Mid = cid
+	request.Icon = icon
+	request.IconBig = icon
+	request.Sex = sex
+	request.Nick = nick
+	request.Phone = phone
+	reqBytes, err := request.Marshal()
+	if err != nil {
+		return false
+	}
+	response := service.Client.SendAndRecvRespRpcMsg("pgUser.modifyUserInfo", reqBytes, 2000, 0)
+	if response.ReturnCode != 0 {
+		return false
+	}
+	pgResp := new(pgUser.ModifyUserInfoResponse)
+	pgResp.Unmarshal(response.Body)
+	plog.Debug("BaseLogic.modifyUser resp: ", pgResp)
+	//成功
+	if pgResp.Status == 0 {
+		return true
+	} else { //失败
+		return false
+	}
+}
